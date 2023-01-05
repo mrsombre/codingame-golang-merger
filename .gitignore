@@ -1,0 +1,5 @@
+/.idea/
+
+/bin/
+/test/
+/_compiled.go
