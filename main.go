@@ -39,7 +39,7 @@ func NewMerger() *Merger {
 	return merger
 }
 
-func (m *Merger) ParseDir(dirName string) error {
+func (m *Merger) ParseDir(dirName, sourceName string) error {
 	fileInfo, err := os.ReadDir(dirName)
 	if err != nil {
 		panic(err)
@@ -56,6 +56,9 @@ func (m *Merger) ParseDir(dirName string) error {
 			continue
 		}
 		if !strings.HasSuffix(filename, ".go") {
+			continue
+		}
+		if filename == sourceName {
 			continue
 		}
 
@@ -208,8 +211,8 @@ func (m *Merger) sortAddedFuncs() []*ast.FuncDecl {
 	return sortedFuncs
 }
 
-func (m *Merger) WriteToFile(fileName string) error {
-	source, err := os.Create(fileName)
+func (m *Merger) WriteToFile(sourceName string) error {
+	source, err := os.Create(sourceName)
 	if err != nil {
 		return err
 	}
@@ -249,7 +252,7 @@ func main() {
 	}
 
 	merger := NewMerger()
-	if err = merger.ParseDir(dirName); err != nil {
+	if err = merger.ParseDir(dirName, sourceName); err != nil {
 		fmt.Println(err)
 		return
 	}
