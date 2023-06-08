@@ -1,8 +1,6 @@
-package main
+package internal
 
 import (
-	"flag"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
@@ -231,35 +229,4 @@ func (m *Merger) WriteToFile(sourceName string) error {
 	}
 
 	return nil
-}
-
-func main() {
-	var err error
-
-	var sourceName string
-	var dirName string
-
-	helpFlag := flag.Bool("help", false, "Show usage summary")
-	flag.StringVar(&sourceName, "source", "_compiled.go", "Name of the merged source file")
-	flag.StringVar(&dirName, "dir", ".", "Directory to parse")
-	flag.Parse()
-
-	if *helpFlag {
-		fmt.Println("Usage: merger [options]")
-		fmt.Println("Options:")
-		flag.PrintDefaults()
-		os.Exit(0)
-	}
-
-	merger := NewMerger()
-	if err = merger.ParseDir(dirName, sourceName); err != nil {
-		fmt.Println(err)
-		return
-	}
-	if err = merger.WriteToFile(sourceName); err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	fmt.Println("Files merged successfully!")
 }

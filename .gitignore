@@ -2,4 +2,5 @@
 
 /bin/
 /test/
-/_compiled.go
+
+/_merged.go
