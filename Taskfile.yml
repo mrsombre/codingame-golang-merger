@@ -1,0 +1,27 @@
+# https://taskfile.dev
+version: '3'
+
+vars:
+  BIN_DIR: "{{.PWD}}/bin"
+
+  GIT_COMMIT:
+    sh: test -e .git && git rev-parse HEAD || echo "unknown"
+
+  GO_XFLAGS: |
+    -X 'main.version={{.GIT_COMMIT | substr 0 7}}' \
+    -X 'main.date={{now | date "2006-01-02T15:04"}}' \
+  GO_LDFLAGS: -w -s
+  GO_BUILDFLAGS: -ldflags "{{.GO_LDFLAGS}} {{.GO_XFLAGS}}"
+
+tasks:
+
+  test:
+    desc: Run golang tests
+    cmd: go test ./... -v
+
+  build:
+    desc: Build the agent go binary.
+    cmd: go build {{.GO_BUILDFLAGS}} -o {{.BIN_DIR}}/cgmerge ./cmd/cgmerge/main.go
+
+  try:
+    cmd: echo {{.GO_XFLAGS}}

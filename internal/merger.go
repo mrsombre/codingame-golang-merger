@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
@@ -40,9 +41,10 @@ func NewMerger() *Merger {
 func (m *Merger) ParseDir(dirName, sourceName string) error {
 	fileInfo, err := os.ReadDir(dirName)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
+	cnt := 0
 	for _, f := range fileInfo {
 		if f.IsDir() {
 			continue
@@ -64,6 +66,12 @@ func (m *Merger) ParseDir(dirName, sourceName string) error {
 		if err := m.parseFile(path); err != nil {
 			return err
 		}
+		cnt++
+	}
+
+	if cnt == 0 {
+		realpath, _ := filepath.Abs(dirName)
+		return fmt.Errorf("no golang source files found in %s", realpath)
 	}
 
 	return nil
