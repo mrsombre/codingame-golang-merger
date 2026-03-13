@@ -323,6 +323,10 @@ func rewriteExpr(expr ast.Expr, alias string) ast.Expr {
 		e.Value = rewriteExpr(e.Value, alias)
 	case *ast.ChanType:
 		e.Value = rewriteExpr(e.Value, alias)
+	case *ast.StructType:
+		rewriteFieldList(e.Fields, alias)
+	case *ast.InterfaceType:
+		rewriteFieldList(e.Methods, alias)
 	case *ast.FuncLit:
 		rewriteFieldList(e.Type.Params, alias)
 		rewriteFieldList(e.Type.Results, alias)
@@ -388,11 +392,14 @@ func rewriteStmt(stmt ast.Stmt, alias string) {
 	case *ast.DeclStmt:
 		if gen, ok := s.Decl.(*ast.GenDecl); ok {
 			for _, spec := range gen.Specs {
-				if v, ok := spec.(*ast.ValueSpec); ok {
-					v.Type = rewriteExpr(v.Type, alias)
-					for i := range v.Values {
-						v.Values[i] = rewriteExpr(v.Values[i], alias)
+				switch sp := spec.(type) {
+				case *ast.ValueSpec:
+					sp.Type = rewriteExpr(sp.Type, alias)
+					for i := range sp.Values {
+						sp.Values[i] = rewriteExpr(sp.Values[i], alias)
 					}
+				case *ast.TypeSpec:
+					sp.Type = rewriteExpr(sp.Type, alias)
 				}
 			}
 		}
@@ -444,6 +451,7 @@ func rewriteSelectors(m *Merger, alias string) {
 		if fn.Body != nil {
 			rewriteStmtList(fn.Body.List, alias)
 		}
+		rewriteFieldList(fn.Recv, alias)
 		rewriteFieldList(fn.Type.Params, alias)
 		rewriteFieldList(fn.Type.Results, alias)
 	}
@@ -454,6 +462,12 @@ func rewriteSelectors(m *Merger, alias string) {
 			for i := range v.Values {
 				v.Values[i] = rewriteExpr(v.Values[i], alias)
 			}
+		}
+	}
+
+	for _, spec := range m.addedTypes {
+		if t, ok := spec.(*ast.TypeSpec); ok {
+			t.Type = rewriteExpr(t.Type, alias)
 		}
 	}
 }
@@ -493,6 +507,14 @@ func (m *Merger) resolveLocalImports() error {
 		rewriteSelectors(m, alias)
 
 		m.inlinePackage(pkg, used)
+	}
+
+	// Second pass: rewrite any alias.XYZ refs that were introduced by inlined
+	// packages (e.g. bot functions using game.XYZ inlined before game was rewritten).
+	for _, alias := range m.localImports {
+		if alias != "_" {
+			rewriteSelectors(m, alias)
+		}
 	}
 
 	return nil
@@ -555,6 +577,10 @@ func (m *Merger) inlinePackage(pkg *PackageSymbols, used map[string]bool) {
 	}
 
 	for path, spec := range pkg.imports {
+		importPath := strings.Trim(path, `"`)
+		if m.moduleName != "" && strings.HasPrefix(importPath, m.moduleName) {
+			continue // local package already inlined, don't re-import
+		}
 		if _, exists := m.addedImports[path]; !exists {
 			m.addedImports[path] = spec
 		}
