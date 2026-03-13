@@ -47,25 +47,52 @@ func readModuleName(repoRoot string) (string, error) {
 	return "", fmt.Errorf("module directive not found in go.mod")
 }
 
+// recvTypeName extracts the receiver type name from a method declaration.
+func recvTypeName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return ""
+	}
+	t := fn.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if ident, ok := t.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return ""
+}
+
+// funcKey returns a unique key for a function declaration.
+// Methods are keyed as "RecvType.MethodName", standalone functions by name.
+func funcKey(fn *ast.FuncDecl) string {
+	recv := recvTypeName(fn)
+	if recv == "" {
+		return fn.Name.Name
+	}
+	return recv + "." + fn.Name.Name
+}
+
 // PackageSymbols holds all declarations from a parsed package.
 type PackageSymbols struct {
-	alias      string
-	funcs      map[string]*ast.FuncDecl
-	types      map[string]ast.Spec
-	vars       map[string]ast.Spec
-	consts     []*ast.GenDecl
-	constNames map[string]bool
-	imports    map[string]ast.Spec
+	alias       string
+	funcs       map[string]*ast.FuncDecl
+	types       map[string]ast.Spec
+	vars        map[string]ast.Spec
+	consts      []*ast.GenDecl
+	constNames  map[string]bool
+	imports     map[string]ast.Spec
+	typeMethods map[string][]string // type name → list of func keys
 }
 
 func parsePackageSymbols(dir, alias string) (*PackageSymbols, error) {
 	pkg := &PackageSymbols{
-		alias:      alias,
-		funcs:      make(map[string]*ast.FuncDecl),
-		types:      make(map[string]ast.Spec),
-		vars:       make(map[string]ast.Spec),
-		constNames: make(map[string]bool),
-		imports:    make(map[string]ast.Spec),
+		alias:       alias,
+		funcs:       make(map[string]*ast.FuncDecl),
+		types:       make(map[string]ast.Spec),
+		vars:        make(map[string]ast.Spec),
+		constNames:  make(map[string]bool),
+		imports:     make(map[string]ast.Spec),
+		typeMethods: make(map[string][]string),
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -135,7 +162,11 @@ func parsePackageSymbols(dir, alias string) (*PackageSymbols, error) {
 					}
 				}
 			case *ast.FuncDecl:
-				pkg.funcs[d.Name.Name] = d
+				key := funcKey(d)
+				pkg.funcs[key] = d
+				if recv := recvTypeName(d); recv != "" {
+					pkg.typeMethods[recv] = append(pkg.typeMethods[recv], key)
+				}
 			}
 		}
 	}
@@ -170,6 +201,23 @@ func computeUsedSymbols(m *Merger, alias string) map[string]bool {
 	return used
 }
 
+// expandTypeMethods marks all methods of used types as used.
+func expandTypeMethods(pkg *PackageSymbols, used map[string]bool) bool {
+	added := false
+	for typeName, methods := range pkg.typeMethods {
+		if !used[typeName] {
+			continue
+		}
+		for _, key := range methods {
+			if !used[key] {
+				used[key] = true
+				added = true
+			}
+		}
+	}
+	return added
+}
+
 // expandTransitive expands the used set to include transitive dependencies
 // within the package.
 func expandTransitive(pkg *PackageSymbols, used map[string]bool) map[string]bool {
@@ -186,6 +234,8 @@ func expandTransitive(pkg *PackageSymbols, used map[string]bool) map[string]bool
 	for name := range pkg.constNames {
 		allSymbols[name] = true
 	}
+
+	expandTypeMethods(pkg, used)
 
 	for {
 		newUsed := make(map[string]bool)
@@ -211,6 +261,7 @@ func expandTransitive(pkg *PackageSymbols, used map[string]bool) map[string]bool
 		for name := range newUsed {
 			used[name] = true
 		}
+		expandTypeMethods(pkg, used)
 	}
 
 	return used
