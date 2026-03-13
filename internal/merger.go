@@ -15,11 +15,15 @@ import (
 type Merger struct {
 	tree         *ast.File
 	addedImports map[string]ast.Spec
-	addedConsts  map[string]ast.Spec
+	constDecls   []*ast.GenDecl
+	constNames   map[string]bool
 	addedTypes   map[string]ast.Spec
 	addedVars    map[string]ast.Spec
 	addedFunc    map[string]*ast.FuncDecl
 	specialFunc  map[string]bool
+	moduleName   string
+	repoRoot     string
+	localImports map[string]string // import path → alias
 }
 
 func NewMerger() *Merger {
@@ -28,17 +32,26 @@ func NewMerger() *Merger {
 			Name: ast.NewIdent("main"),
 		},
 		addedImports: make(map[string]ast.Spec),
-		addedConsts:  make(map[string]ast.Spec),
+		constNames:   make(map[string]bool),
 		addedTypes:   make(map[string]ast.Spec),
 		addedVars:    make(map[string]ast.Spec),
 		addedFunc:    make(map[string]*ast.FuncDecl),
 		specialFunc:  map[string]bool{`init`: true, `main`: true},
+		localImports: make(map[string]string),
 	}
 
 	return merger
 }
 
 func (m *Merger) ParseDir(dirName, sourceName string) error {
+	// Detect module root for cross-package inlining
+	if root, err := findModuleRoot(dirName); err == nil {
+		m.repoRoot = root
+		if name, err := readModuleName(root); err == nil {
+			m.moduleName = name
+		}
+	}
+
 	fileInfo, err := os.ReadDir(dirName)
 	if err != nil {
 		return err
@@ -72,6 +85,11 @@ func (m *Merger) ParseDir(dirName, sourceName string) error {
 	if cnt == 0 {
 		realpath, _ := filepath.Abs(dirName)
 		return fmt.Errorf("no golang source files found in %s", realpath)
+	}
+
+	// Resolve local package imports (inline used symbols)
+	if err := m.resolveLocalImports(); err != nil {
+		return err
 	}
 
 	return nil
@@ -115,16 +133,42 @@ func (m *Merger) parseGenDecl(decl *ast.GenDecl) {
 	case token.IMPORT:
 		for _, spec := range decl.Specs {
 			if v, ok := spec.(*ast.ImportSpec); ok {
-				m.addedImports[v.Path.Value] = spec
+				importPath := strings.Trim(v.Path.Value, `"`)
+				if m.moduleName != "" && strings.HasPrefix(importPath, m.moduleName) {
+					alias := filepath.Base(importPath)
+					if v.Name != nil {
+						alias = v.Name.Name
+					}
+					if alias != "_" {
+						m.localImports[importPath] = alias
+					}
+				} else {
+					m.addedImports[v.Path.Value] = spec
+				}
 			}
 		}
 	case token.CONST:
+		// Preserve each const block as a unit so iota values stay correct.
+		filtered := &ast.GenDecl{Tok: token.CONST, Lparen: decl.Lparen, Rparen: decl.Rparen}
 		for _, spec := range decl.Specs {
 			if v, ok := spec.(*ast.ValueSpec); ok {
+				dup := false
 				for _, name := range v.Names {
-					m.addedConsts[name.Name] = spec
+					if m.constNames[name.Name] {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					for _, name := range v.Names {
+						m.constNames[name.Name] = true
+					}
+					filtered.Specs = append(filtered.Specs, spec)
 				}
 			}
+		}
+		if len(filtered.Specs) > 0 {
+			m.constDecls = append(m.constDecls, filtered)
 		}
 	case token.TYPE:
 		for _, spec := range decl.Specs {
@@ -135,9 +179,9 @@ func (m *Merger) parseGenDecl(decl *ast.GenDecl) {
 	case token.VAR:
 		for _, spec := range decl.Specs {
 			if v, ok := spec.(*ast.ValueSpec); ok {
-				for _, name := range v.Names {
-					m.addedVars[name.Name] = spec
-				}
+				// Use first name as key so multi-name specs (var W, H int)
+				// are stored once, not once per name.
+				m.addedVars[v.Names[0].Name] = spec
 			}
 		}
 	}
@@ -157,15 +201,8 @@ func (m *Merger) buildGenDecl() {
 		})
 	}
 
-	specs = make([]ast.Spec, 0, len(m.addedConsts))
-	for _, spec := range m.addedConsts {
-		specs = append(specs, spec)
-	}
-	if len(specs) > 0 {
-		m.tree.Decls = append(m.tree.Decls, &ast.GenDecl{
-			Tok:   token.CONST,
-			Specs: specs,
-		})
+	for _, decl := range m.constDecls {
+		m.tree.Decls = append(m.tree.Decls, decl)
 	}
 
 	specs = make([]ast.Spec, 0, len(m.addedVars))

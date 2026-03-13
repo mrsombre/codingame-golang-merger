@@ -32,7 +32,7 @@ cgmerge [--output <output_filename>] [--dir <source_directory_name>]
 
 ```shell
   -d, --dir string      Source directory to parse (default ".")
-  -o, --output string   Output file name (default "_merged.go")
+  -o, --output string   Output file name (default "bundle.go")
   -h, --help            Show usage summary
 ```
 

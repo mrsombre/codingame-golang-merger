@@ -22,7 +22,7 @@ func main() {
 	var showHelp bool
 	var showVersion bool
 
-	flag.StringVarP(&optSourceName, "output", "o", "_merged.go", "Output file name")
+	flag.StringVarP(&optSourceName, "output", "o", "bundle.go", "Output file name")
 	flag.StringVarP(&optDirName, "dir", "d", ".", "Source directory to parse")
 	flag.BoolVarP(&showHelp, "help", "h", false, "Show usage summary")
 	flag.BoolVarP(&showVersion, "version", "v", false, "Show version")
