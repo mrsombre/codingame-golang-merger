@@ -23,5 +23,15 @@ tasks:
     desc: Build the agent go binary.
     cmd: go build {{.GO_BUILDFLAGS}} -o {{.BIN_DIR}}/cgmerge ./cmd/cgmerge/main.go
 
+  bundle:flat:
+    desc: Bundle example/flat into tmp/flat.go
+    deps: [build]
+    cmd: "{{.BIN_DIR}}/cgmerge -d example/flat -o tmp/flat.go"
+
+  bundle:nested:
+    desc: Bundle example/nested into tmp/nested.go
+    deps: [build]
+    cmd: "{{.BIN_DIR}}/cgmerge -d example/nested/cmd -o tmp/nested.go"
+
   try:
     cmd: echo {{.GO_XFLAGS}}

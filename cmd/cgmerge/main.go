@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	flag "github.com/spf13/pflag"
 
@@ -40,6 +41,10 @@ func main() {
 		os.Exit(0)
 	}
 
+	if !flag.CommandLine.Changed("output") {
+		optSourceName = filepath.Join(optDirName, optSourceName)
+	}
+
 	merger := internal.NewMerger()
 	if err = merger.ParseDir(optDirName, optSourceName); err != nil {
 		fmt.Println(err)
@@ -51,5 +56,8 @@ func main() {
 		return
 	}
 
-	fmt.Println("Files merged successfully!")
+	absDirMain, _ := filepath.Abs(filepath.Join(optDirName, "main.go"))
+	absOutput, _ := filepath.Abs(optSourceName)
+	info, _ := os.Stat(optSourceName)
+	fmt.Printf("merged %s ->\n  %s (%d chars)\n", absDirMain, absOutput, info.Size())
 }
