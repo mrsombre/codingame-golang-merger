@@ -7,10 +7,10 @@ import (
 // eliminateDeadCode removes symbols not reachable from main() and init().
 func (m *Merger) eliminateDeadCode() {
 	// Build name-based index for functions (addedFunc keys may be position strings).
-	funcByName := make(map[string]*ast.FuncDecl)    // funcName → decl
-	funcByKey := make(map[string]*ast.FuncDecl)      // funcKey(decl) → decl
-	funcKeyToMapKey := make(map[string]string)        // funcKey(decl) → addedFunc map key
-	funcNameToMapKeys := make(map[string][]string)    // funcName → addedFunc map keys
+	funcByName := make(map[string]*ast.FuncDecl)   // funcName → decl
+	funcByKey := make(map[string]*ast.FuncDecl)    // funcKey(decl) → decl
+	funcKeyToMapKey := make(map[string]string)     // funcKey(decl) → addedFunc map key
+	funcNameToMapKeys := make(map[string][]string) // funcName → addedFunc map keys
 	for mapKey, fn := range m.addedFunc {
 		fk := funcKey(fn)
 		funcByKey[fk] = fn

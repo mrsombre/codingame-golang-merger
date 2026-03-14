@@ -18,6 +18,9 @@ func main() {
 
 	fmt.Println(alpha.ExampleConst)
 
+	d := alpha.DirDelta[alpha.DirRight]
+	fmt.Println(d[0], d[1])
+
 	exWithFunc := &gamma.ExampleTypeWithFunc{ID: 1, Value: 95.0}
 	exUsingOther := &gamma.ExampleTypeUsingOther{Name: "main"}
 	fmt.Println(exUsingOther.Check(exWithFunc))

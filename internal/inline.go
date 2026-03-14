@@ -266,6 +266,9 @@ func expandTransitive(pkg *PackageSymbols, used map[string]bool) map[string]bool
 			if spec, ok := pkg.types[name]; ok {
 				ast.Inspect(spec, inspectNode)
 			}
+			if spec, ok := pkg.vars[name]; ok {
+				ast.Inspect(spec, inspectNode)
+			}
 		}
 		if len(newUsed) == 0 {
 			break
@@ -1009,6 +1012,10 @@ func (m *Merger) resolveCrossPkgDeps(parsedPkgs map[string]*PackageSymbols) {
 					m.addedFunc[name] = fn
 				}
 			case "const":
+				// Skip if already added as part of a block by a previous iteration.
+				if m.constNames[name] {
+					break
+				}
 				// Find and inline the entire const block containing this name.
 				for _, block := range ref.pkg.consts {
 					for _, spec := range block.Specs {
