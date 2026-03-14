@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -63,7 +64,6 @@ func recvTypeName(fn *ast.FuncDecl) string {
 }
 
 // funcKey returns a unique key for a function declaration.
-// Methods are keyed as "RecvType.MethodName", standalone functions by name.
 func funcKey(fn *ast.FuncDecl) string {
 	recv := recvTypeName(fn)
 	if recv == "" {
@@ -74,25 +74,27 @@ func funcKey(fn *ast.FuncDecl) string {
 
 // PackageSymbols holds all declarations from a parsed package.
 type PackageSymbols struct {
-	alias       string
-	funcs       map[string]*ast.FuncDecl
-	types       map[string]ast.Spec
-	vars        map[string]ast.Spec
-	consts      []*ast.GenDecl
-	constNames  map[string]bool
-	imports     map[string]ast.Spec
-	typeMethods map[string][]string // type name → list of func keys
+	alias        string
+	funcs        map[string]*ast.FuncDecl
+	types        map[string]ast.Spec
+	vars         map[string]ast.Spec
+	consts       []*ast.GenDecl
+	constNames   map[string]bool
+	imports      map[string]ast.Spec
+	typeMethods  map[string][]string
+	localImports map[string]string // import path → alias (for sub-package deps)
 }
 
-func parsePackageSymbols(dir, alias string) (*PackageSymbols, error) {
+func parsePackageSymbols(dir, alias, moduleName string) (*PackageSymbols, error) {
 	pkg := &PackageSymbols{
-		alias:       alias,
-		funcs:       make(map[string]*ast.FuncDecl),
-		types:       make(map[string]ast.Spec),
-		vars:        make(map[string]ast.Spec),
-		constNames:  make(map[string]bool),
-		imports:     make(map[string]ast.Spec),
-		typeMethods: make(map[string][]string),
+		alias:        alias,
+		funcs:        make(map[string]*ast.FuncDecl),
+		types:        make(map[string]ast.Spec),
+		vars:         make(map[string]ast.Spec),
+		constNames:   make(map[string]bool),
+		imports:      make(map[string]ast.Spec),
+		typeMethods:  make(map[string][]string),
+		localImports: make(map[string]string),
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -123,7 +125,18 @@ func parsePackageSymbols(dir, alias string) (*PackageSymbols, error) {
 				case token.IMPORT:
 					for _, spec := range d.Specs {
 						if v, ok := spec.(*ast.ImportSpec); ok {
-							pkg.imports[v.Path.Value] = spec
+							impPath := strings.Trim(v.Path.Value, `"`)
+							if moduleName != "" && strings.HasPrefix(impPath, moduleName) {
+								localAlias := filepath.Base(impPath)
+								if v.Name != nil {
+									localAlias = v.Name.Name
+								}
+								if localAlias != "_" {
+									pkg.localImports[impPath] = localAlias
+								}
+							} else {
+								pkg.imports[v.Path.Value] = spec
+							}
 						}
 					}
 				case token.CONST:
@@ -218,8 +231,7 @@ func expandTypeMethods(pkg *PackageSymbols, used map[string]bool) bool {
 	return added
 }
 
-// expandTransitive expands the used set to include transitive dependencies
-// within the package.
+// expandTransitive expands the used set to include transitive dependencies.
 func expandTransitive(pkg *PackageSymbols, used map[string]bool) map[string]bool {
 	allSymbols := make(map[string]bool)
 	for name := range pkg.funcs {
@@ -267,209 +279,351 @@ func expandTransitive(pkg *PackageSymbols, used map[string]bool) map[string]bool
 	return used
 }
 
-// rewriteExpr replaces alias.Symbol selector expressions with just Symbol.
-func rewriteExpr(expr ast.Expr, alias string) ast.Expr {
+// rewriteExprPrefix replaces alias.Symbol selector expressions with prefixSymbol.
+// When prefix is "", it behaves like the old rewriteExpr (drops alias, keeps symbol name).
+func rewriteExprPrefix(expr ast.Expr, alias, prefix string) ast.Expr {
 	if expr == nil {
 		return nil
 	}
 
 	if sel, ok := expr.(*ast.SelectorExpr); ok {
 		if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == alias {
-			return sel.Sel
+			return ast.NewIdent(prefix + sel.Sel.Name)
 		}
 	}
 
 	switch e := expr.(type) {
 	case *ast.CallExpr:
-		e.Fun = rewriteExpr(e.Fun, alias)
+		e.Fun = rewriteExprPrefix(e.Fun, alias, prefix)
 		for i, arg := range e.Args {
-			e.Args[i] = rewriteExpr(arg, alias)
+			e.Args[i] = rewriteExprPrefix(arg, alias, prefix)
 		}
 	case *ast.BinaryExpr:
-		e.X = rewriteExpr(e.X, alias)
-		e.Y = rewriteExpr(e.Y, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
+		e.Y = rewriteExprPrefix(e.Y, alias, prefix)
 	case *ast.UnaryExpr:
-		e.X = rewriteExpr(e.X, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
 	case *ast.ParenExpr:
-		e.X = rewriteExpr(e.X, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
 	case *ast.IndexExpr:
-		e.X = rewriteExpr(e.X, alias)
-		e.Index = rewriteExpr(e.Index, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
+		e.Index = rewriteExprPrefix(e.Index, alias, prefix)
 	case *ast.SliceExpr:
-		e.X = rewriteExpr(e.X, alias)
-		e.Low = rewriteExpr(e.Low, alias)
-		e.High = rewriteExpr(e.High, alias)
-		e.Max = rewriteExpr(e.Max, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
+		e.Low = rewriteExprPrefix(e.Low, alias, prefix)
+		e.High = rewriteExprPrefix(e.High, alias, prefix)
+		e.Max = rewriteExprPrefix(e.Max, alias, prefix)
 	case *ast.StarExpr:
-		e.X = rewriteExpr(e.X, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
 	case *ast.CompositeLit:
-		e.Type = rewriteExpr(e.Type, alias)
+		e.Type = rewriteExprPrefix(e.Type, alias, prefix)
 		for i, elt := range e.Elts {
-			e.Elts[i] = rewriteExpr(elt, alias)
+			e.Elts[i] = rewriteExprPrefix(elt, alias, prefix)
 		}
 	case *ast.KeyValueExpr:
-		e.Key = rewriteExpr(e.Key, alias)
-		e.Value = rewriteExpr(e.Value, alias)
+		e.Key = rewriteExprPrefix(e.Key, alias, prefix)
+		e.Value = rewriteExprPrefix(e.Value, alias, prefix)
 	case *ast.TypeAssertExpr:
-		e.X = rewriteExpr(e.X, alias)
-		e.Type = rewriteExpr(e.Type, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
+		e.Type = rewriteExprPrefix(e.Type, alias, prefix)
 	case *ast.SelectorExpr:
-		e.X = rewriteExpr(e.X, alias)
+		e.X = rewriteExprPrefix(e.X, alias, prefix)
 	case *ast.ArrayType:
-		e.Len = rewriteExpr(e.Len, alias)
-		e.Elt = rewriteExpr(e.Elt, alias)
+		e.Len = rewriteExprPrefix(e.Len, alias, prefix)
+		e.Elt = rewriteExprPrefix(e.Elt, alias, prefix)
 	case *ast.MapType:
-		e.Key = rewriteExpr(e.Key, alias)
-		e.Value = rewriteExpr(e.Value, alias)
+		e.Key = rewriteExprPrefix(e.Key, alias, prefix)
+		e.Value = rewriteExprPrefix(e.Value, alias, prefix)
 	case *ast.ChanType:
-		e.Value = rewriteExpr(e.Value, alias)
+		e.Value = rewriteExprPrefix(e.Value, alias, prefix)
 	case *ast.StructType:
-		rewriteFieldList(e.Fields, alias)
+		rewriteFieldListPrefix(e.Fields, alias, prefix)
 	case *ast.InterfaceType:
-		rewriteFieldList(e.Methods, alias)
+		rewriteFieldListPrefix(e.Methods, alias, prefix)
 	case *ast.FuncLit:
-		rewriteFieldList(e.Type.Params, alias)
-		rewriteFieldList(e.Type.Results, alias)
+		rewriteFieldListPrefix(e.Type.Params, alias, prefix)
+		rewriteFieldListPrefix(e.Type.Results, alias, prefix)
 		if e.Body != nil {
-			rewriteStmtList(e.Body.List, alias)
+			rewriteStmtListPrefix(e.Body.List, alias, prefix)
 		}
 	}
 
 	return expr
 }
 
-func rewriteFieldList(fl *ast.FieldList, alias string) {
+func rewriteFieldListPrefix(fl *ast.FieldList, alias, prefix string) {
 	if fl == nil {
 		return
 	}
 	for _, field := range fl.List {
-		field.Type = rewriteExpr(field.Type, alias)
+		field.Type = rewriteExprPrefix(field.Type, alias, prefix)
 	}
 }
 
-func rewriteStmt(stmt ast.Stmt, alias string) {
+func rewriteStmtPrefix(stmt ast.Stmt, alias, prefix string) {
 	if stmt == nil {
 		return
 	}
 
 	switch s := stmt.(type) {
 	case *ast.ExprStmt:
-		s.X = rewriteExpr(s.X, alias)
+		s.X = rewriteExprPrefix(s.X, alias, prefix)
 	case *ast.AssignStmt:
 		for i := range s.Lhs {
-			s.Lhs[i] = rewriteExpr(s.Lhs[i], alias)
+			s.Lhs[i] = rewriteExprPrefix(s.Lhs[i], alias, prefix)
 		}
 		for i := range s.Rhs {
-			s.Rhs[i] = rewriteExpr(s.Rhs[i], alias)
+			s.Rhs[i] = rewriteExprPrefix(s.Rhs[i], alias, prefix)
 		}
 	case *ast.ReturnStmt:
 		for i := range s.Results {
-			s.Results[i] = rewriteExpr(s.Results[i], alias)
+			s.Results[i] = rewriteExprPrefix(s.Results[i], alias, prefix)
 		}
 	case *ast.IfStmt:
-		rewriteStmt(s.Init, alias)
-		s.Cond = rewriteExpr(s.Cond, alias)
-		rewriteStmt(s.Body, alias)
-		rewriteStmt(s.Else, alias)
+		rewriteStmtPrefix(s.Init, alias, prefix)
+		s.Cond = rewriteExprPrefix(s.Cond, alias, prefix)
+		rewriteStmtPrefix(s.Body, alias, prefix)
+		rewriteStmtPrefix(s.Else, alias, prefix)
 	case *ast.BlockStmt:
 		if s != nil {
-			rewriteStmtList(s.List, alias)
+			rewriteStmtListPrefix(s.List, alias, prefix)
 		}
 	case *ast.ForStmt:
-		rewriteStmt(s.Init, alias)
-		s.Cond = rewriteExpr(s.Cond, alias)
-		rewriteStmt(s.Post, alias)
-		rewriteStmt(s.Body, alias)
+		rewriteStmtPrefix(s.Init, alias, prefix)
+		s.Cond = rewriteExprPrefix(s.Cond, alias, prefix)
+		rewriteStmtPrefix(s.Post, alias, prefix)
+		rewriteStmtPrefix(s.Body, alias, prefix)
 	case *ast.RangeStmt:
 		if s.Key != nil {
-			s.Key = rewriteExpr(s.Key, alias)
+			s.Key = rewriteExprPrefix(s.Key, alias, prefix)
 		}
 		if s.Value != nil {
-			s.Value = rewriteExpr(s.Value, alias)
+			s.Value = rewriteExprPrefix(s.Value, alias, prefix)
 		}
-		s.X = rewriteExpr(s.X, alias)
-		rewriteStmt(s.Body, alias)
+		s.X = rewriteExprPrefix(s.X, alias, prefix)
+		rewriteStmtPrefix(s.Body, alias, prefix)
 	case *ast.DeclStmt:
 		if gen, ok := s.Decl.(*ast.GenDecl); ok {
 			for _, spec := range gen.Specs {
 				switch sp := spec.(type) {
 				case *ast.ValueSpec:
-					sp.Type = rewriteExpr(sp.Type, alias)
+					sp.Type = rewriteExprPrefix(sp.Type, alias, prefix)
 					for i := range sp.Values {
-						sp.Values[i] = rewriteExpr(sp.Values[i], alias)
+						sp.Values[i] = rewriteExprPrefix(sp.Values[i], alias, prefix)
 					}
 				case *ast.TypeSpec:
-					sp.Type = rewriteExpr(sp.Type, alias)
+					sp.Type = rewriteExprPrefix(sp.Type, alias, prefix)
 				}
 			}
 		}
 	case *ast.SwitchStmt:
-		rewriteStmt(s.Init, alias)
-		s.Tag = rewriteExpr(s.Tag, alias)
-		rewriteStmt(s.Body, alias)
+		rewriteStmtPrefix(s.Init, alias, prefix)
+		s.Tag = rewriteExprPrefix(s.Tag, alias, prefix)
+		rewriteStmtPrefix(s.Body, alias, prefix)
 	case *ast.TypeSwitchStmt:
-		rewriteStmt(s.Init, alias)
-		rewriteStmt(s.Assign, alias)
-		rewriteStmt(s.Body, alias)
+		rewriteStmtPrefix(s.Init, alias, prefix)
+		rewriteStmtPrefix(s.Assign, alias, prefix)
+		rewriteStmtPrefix(s.Body, alias, prefix)
 	case *ast.CaseClause:
 		for i := range s.List {
-			s.List[i] = rewriteExpr(s.List[i], alias)
+			s.List[i] = rewriteExprPrefix(s.List[i], alias, prefix)
 		}
-		rewriteStmtList(s.Body, alias)
+		rewriteStmtListPrefix(s.Body, alias, prefix)
 	case *ast.SelectStmt:
-		rewriteStmt(s.Body, alias)
+		rewriteStmtPrefix(s.Body, alias, prefix)
 	case *ast.CommClause:
-		rewriteStmt(s.Comm, alias)
-		rewriteStmtList(s.Body, alias)
+		rewriteStmtPrefix(s.Comm, alias, prefix)
+		rewriteStmtListPrefix(s.Body, alias, prefix)
 	case *ast.SendStmt:
-		s.Chan = rewriteExpr(s.Chan, alias)
-		s.Value = rewriteExpr(s.Value, alias)
+		s.Chan = rewriteExprPrefix(s.Chan, alias, prefix)
+		s.Value = rewriteExprPrefix(s.Value, alias, prefix)
 	case *ast.IncDecStmt:
-		s.X = rewriteExpr(s.X, alias)
+		s.X = rewriteExprPrefix(s.X, alias, prefix)
 	case *ast.GoStmt:
-		s.Call.Fun = rewriteExpr(s.Call.Fun, alias)
+		s.Call.Fun = rewriteExprPrefix(s.Call.Fun, alias, prefix)
 		for i := range s.Call.Args {
-			s.Call.Args[i] = rewriteExpr(s.Call.Args[i], alias)
+			s.Call.Args[i] = rewriteExprPrefix(s.Call.Args[i], alias, prefix)
 		}
 	case *ast.DeferStmt:
-		s.Call.Fun = rewriteExpr(s.Call.Fun, alias)
+		s.Call.Fun = rewriteExprPrefix(s.Call.Fun, alias, prefix)
 		for i := range s.Call.Args {
-			s.Call.Args[i] = rewriteExpr(s.Call.Args[i], alias)
+			s.Call.Args[i] = rewriteExprPrefix(s.Call.Args[i], alias, prefix)
 		}
 	}
 }
 
-func rewriteStmtList(stmts []ast.Stmt, alias string) {
+func rewriteStmtListPrefix(stmts []ast.Stmt, alias, prefix string) {
 	for _, stmt := range stmts {
-		rewriteStmt(stmt, alias)
+		rewriteStmtPrefix(stmt, alias, prefix)
 	}
 }
 
-// rewriteSelectors rewrites all alias.Symbol references in source code.
-func rewriteSelectors(m *Merger, alias string) {
+// rewriteSelectorsPrefix rewrites all alias.Symbol references in the merger's code
+// to prefixSymbol.
+func rewriteSelectorsPrefix(m *Merger, alias, prefix string) {
 	for _, fn := range m.addedFunc {
 		if fn.Body != nil {
-			rewriteStmtList(fn.Body.List, alias)
+			rewriteStmtListPrefix(fn.Body.List, alias, prefix)
 		}
-		rewriteFieldList(fn.Recv, alias)
-		rewriteFieldList(fn.Type.Params, alias)
-		rewriteFieldList(fn.Type.Results, alias)
+		rewriteFieldListPrefix(fn.Recv, alias, prefix)
+		rewriteFieldListPrefix(fn.Type.Params, alias, prefix)
+		rewriteFieldListPrefix(fn.Type.Results, alias, prefix)
 	}
 
 	for _, spec := range m.addedVars {
 		if v, ok := spec.(*ast.ValueSpec); ok {
-			v.Type = rewriteExpr(v.Type, alias)
+			v.Type = rewriteExprPrefix(v.Type, alias, prefix)
 			for i := range v.Values {
-				v.Values[i] = rewriteExpr(v.Values[i], alias)
+				v.Values[i] = rewriteExprPrefix(v.Values[i], alias, prefix)
 			}
 		}
 	}
 
 	for _, spec := range m.addedTypes {
 		if t, ok := spec.(*ast.TypeSpec); ok {
-			t.Type = rewriteExpr(t.Type, alias)
+			t.Type = rewriteExprPrefix(t.Type, alias, prefix)
 		}
 	}
+}
+
+// renameIdents walks an AST node and renames identifiers according to the map.
+func renameIdents(node ast.Node, renames map[string]string) {
+	ast.Inspect(node, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok {
+			if newName, found := renames[ident.Name]; found {
+				ident.Name = newName
+			}
+		}
+		return true
+	})
+}
+
+// renamePackageSymbols renames all symbols in a package with the given prefix
+// and returns the rename map (old name → new name).
+func renamePackageSymbols(pkg *PackageSymbols, prefix string) map[string]string {
+	if prefix == "" {
+		return nil
+	}
+
+	renames := make(map[string]string)
+
+	// Collect all symbol names that need renaming.
+	for name := range pkg.funcs {
+		parts := strings.SplitN(name, ".", 2)
+		if len(parts) == 2 {
+			// Method: only rename RecvType — method names are scoped by receiver
+			// and call sites (obj.Method()) can't be rewritten without type info.
+			renames[parts[0]] = prefix + parts[0]
+		} else {
+			renames[name] = prefix + name
+		}
+	}
+	for name := range pkg.types {
+		renames[name] = prefix + name
+	}
+	for name := range pkg.vars {
+		renames[name] = prefix + name
+	}
+	for name := range pkg.constNames {
+		renames[name] = prefix + name
+	}
+
+	// Rename all AST nodes within the package.
+	for _, fn := range pkg.funcs {
+		renameIdents(fn, renames)
+	}
+	for _, spec := range pkg.types {
+		renameIdents(spec, renames)
+	}
+	for _, spec := range pkg.vars {
+		renameIdents(spec, renames)
+	}
+	for _, block := range pkg.consts {
+		renameIdents(block, renames)
+	}
+
+	// Rebuild maps with new keys.
+	newFuncs := make(map[string]*ast.FuncDecl, len(pkg.funcs))
+	for _, fn := range pkg.funcs {
+		newFuncs[funcKey(fn)] = fn
+	}
+	pkg.funcs = newFuncs
+
+	newTypes := make(map[string]ast.Spec, len(pkg.types))
+	for _, spec := range pkg.types {
+		if t, ok := spec.(*ast.TypeSpec); ok {
+			newTypes[t.Name.Name] = spec
+		}
+	}
+	pkg.types = newTypes
+
+	newVars := make(map[string]ast.Spec, len(pkg.vars))
+	for _, spec := range pkg.vars {
+		if v, ok := spec.(*ast.ValueSpec); ok {
+			newVars[v.Names[0].Name] = spec
+		}
+	}
+	pkg.vars = newVars
+
+	newConstNames := make(map[string]bool, len(pkg.constNames))
+	for oldName := range pkg.constNames {
+		if newName, ok := renames[oldName]; ok {
+			newConstNames[newName] = true
+		} else {
+			newConstNames[oldName] = true
+		}
+	}
+	pkg.constNames = newConstNames
+
+	newTypeMethods := make(map[string][]string)
+	for typeName, methods := range pkg.typeMethods {
+		newTypeName := typeName
+		if r, ok := renames[typeName]; ok {
+			newTypeName = r
+		}
+		newMethods := make([]string, len(methods))
+		for i, key := range methods {
+			parts := strings.SplitN(key, ".", 2)
+			if len(parts) == 2 {
+				t := parts[0]
+				m := parts[1]
+				if r, ok := renames[t]; ok {
+					t = r
+				}
+				if r, ok := renames[m]; ok {
+					m = r
+				}
+				newMethods[i] = t + "." + m
+			} else {
+				if r, ok := renames[key]; ok {
+					newMethods[i] = r
+				} else {
+					newMethods[i] = key
+				}
+			}
+		}
+		newTypeMethods[newTypeName] = newMethods
+	}
+	pkg.typeMethods = newTypeMethods
+
+	return renames
+}
+
+// buildPrefixMap assigns a prefix letter (a, b, c, ...) to each local import.
+func buildPrefixMap(localImports map[string]string) map[string]string {
+	prefixMap := make(map[string]string, len(localImports))
+
+	// Sort import paths for deterministic prefix assignment.
+	paths := make([]string, 0, len(localImports))
+	for p := range localImports {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	for i, p := range paths {
+		prefixMap[p] = string(rune('a' + i))
+	}
+	return prefixMap
 }
 
 // hasFuncNamed checks if any function with the given name already exists.
@@ -482,57 +636,142 @@ func (m *Merger) hasFuncNamed(name string) bool {
 	return false
 }
 
-// resolveLocalImports processes all local package imports.
+// resolveLocalImports processes all local package imports with prefix renaming.
 func (m *Merger) resolveLocalImports() error {
 	if len(m.localImports) == 0 {
 		return nil
 	}
 
-	for importPath, alias := range m.localImports {
+	prefixMap := buildPrefixMap(m.localImports)
+
+	// Sort import paths for deterministic processing order.
+	importPaths := make([]string, 0, len(m.localImports))
+	for p := range m.localImports {
+		importPaths = append(importPaths, p)
+	}
+	sort.Strings(importPaths)
+
+	// First pass: parse all packages, compute used symbols, rename with prefix,
+	// rewrite selectors in main code, and inline.
+	parsedPkgs := make(map[string]*PackageSymbols)
+	for _, importPath := range importPaths {
+		alias := m.localImports[importPath]
 		if alias == "_" {
 			continue
 		}
 
+		prefix := prefixMap[importPath]
+
 		relPath := strings.TrimPrefix(importPath, m.moduleName+"/")
 		dir := filepath.Join(m.repoRoot, relPath)
 
-		pkg, err := parsePackageSymbols(dir, alias)
+		pkg, err := parsePackageSymbols(dir, alias, m.moduleName)
 		if err != nil {
 			return fmt.Errorf("parsing package %s: %w", importPath, err)
+		}
+
+		// Resolve sub-package local imports (e.g., gamma imports epsilon).
+		if err := m.resolveSubPkgImports(pkg); err != nil {
+			return err
 		}
 
 		used := computeUsedSymbols(m, alias)
 		used = expandTransitive(pkg, used)
 
-		rewriteSelectors(m, alias)
+		// Rewrite cross-package selectors within the package itself.
+		// e.g., bot's code referencing game.Point → aPoint
+		for _, otherPath := range importPaths {
+			otherAlias := m.localImports[otherPath]
+			if otherAlias == "_" || otherPath == importPath {
+				continue
+			}
+			otherPrefix := prefixMap[otherPath]
+			rewritePkgSelectors(pkg, otherAlias, otherPrefix)
+		}
 
-		m.inlinePackage(pkg, used)
+		// Rename symbols within the package with its own prefix.
+		renamePackageSymbols(pkg, prefix)
+
+		// Rewrite selectors in main code: alias.Symbol → prefixSymbol
+		rewriteSelectorsPrefix(m, alias, prefix)
+
+		// Inline the renamed package symbols.
+		m.inlinePackage(pkg, used, prefix)
+
+		parsedPkgs[importPath] = pkg
 	}
 
-	// Second pass: rewrite any alias.XYZ refs that were introduced by inlined
-	// packages (e.g. bot functions using game.XYZ inlined before game was rewritten).
-	for _, alias := range m.localImports {
+	// Second pass: rewrite any remaining alias.XYZ refs introduced by inlined packages.
+	for _, importPath := range importPaths {
+		alias := m.localImports[importPath]
 		if alias != "_" {
-			rewriteSelectors(m, alias)
+			prefix := prefixMap[importPath]
+			rewriteSelectorsPrefix(m, alias, prefix)
 		}
 	}
+
+	// Third pass: resolve cross-package transitive dependencies.
+	// e.g., gamma uses alpha.ExampleVar → rewritten to aExampleVar,
+	// but alpha didn't inline ExampleVar because it wasn't referenced from main.
+	m.resolveCrossPkgDeps(parsedPkgs)
 
 	return nil
 }
 
+// rewritePkgSelectors rewrites selector expressions within a package's own AST.
+// e.g., inside bot package: game.Point → aPoint
+func rewritePkgSelectors(pkg *PackageSymbols, alias, prefix string) {
+	for _, fn := range pkg.funcs {
+		if fn.Body != nil {
+			rewriteStmtListPrefix(fn.Body.List, alias, prefix)
+		}
+		rewriteFieldListPrefix(fn.Recv, alias, prefix)
+		rewriteFieldListPrefix(fn.Type.Params, alias, prefix)
+		rewriteFieldListPrefix(fn.Type.Results, alias, prefix)
+	}
+	for _, spec := range pkg.vars {
+		if v, ok := spec.(*ast.ValueSpec); ok {
+			v.Type = rewriteExprPrefix(v.Type, alias, prefix)
+			for i := range v.Values {
+				v.Values[i] = rewriteExprPrefix(v.Values[i], alias, prefix)
+			}
+		}
+	}
+	for _, spec := range pkg.types {
+		if t, ok := spec.(*ast.TypeSpec); ok {
+			t.Type = rewriteExprPrefix(t.Type, alias, prefix)
+		}
+	}
+}
+
 // inlinePackage merges used symbols from a package into the merger.
-func (m *Merger) inlinePackage(pkg *PackageSymbols, used map[string]bool) {
+// The prefix parameter is used to match prefixed symbol names against the used set.
+func (m *Merger) inlinePackage(pkg *PackageSymbols, used map[string]bool, prefix string) {
 	for name, fn := range pkg.funcs {
-		if !used[name] {
+		// Check if the original (unprefixed) name is in the used set.
+		origName := name
+		if prefix != "" {
+			origName = strings.TrimPrefix(name, prefix)
+			// For methods: aRecvType.MethodName → check RecvType.MethodName
+			parts := strings.SplitN(name, ".", 2)
+			if len(parts) == 2 {
+				origName = strings.TrimPrefix(parts[0], prefix) + "." + parts[1]
+			}
+		}
+		if !used[origName] {
 			continue
 		}
-		if !m.hasFuncNamed(name) {
+		if !m.hasFuncNamed(fn.Name.Name) {
 			m.addedFunc[name] = fn
 		}
 	}
 
 	for name, spec := range pkg.types {
-		if !used[name] {
+		origName := name
+		if prefix != "" {
+			origName = strings.TrimPrefix(name, prefix)
+		}
+		if !used[origName] {
 			continue
 		}
 		if _, exists := m.addedTypes[name]; !exists {
@@ -541,7 +780,11 @@ func (m *Merger) inlinePackage(pkg *PackageSymbols, used map[string]bool) {
 	}
 
 	for name, spec := range pkg.vars {
-		if !used[name] {
+		origName := name
+		if prefix != "" {
+			origName = strings.TrimPrefix(name, prefix)
+		}
+		if !used[origName] {
 			continue
 		}
 		if _, exists := m.addedVars[name]; !exists {
@@ -554,7 +797,11 @@ func (m *Merger) inlinePackage(pkg *PackageSymbols, used map[string]bool) {
 		for _, spec := range block.Specs {
 			if v, ok := spec.(*ast.ValueSpec); ok {
 				for _, n := range v.Names {
-					if used[n.Name] {
+					origName := n.Name
+					if prefix != "" {
+						origName = strings.TrimPrefix(n.Name, prefix)
+					}
+					if used[origName] {
 						blockUsed = true
 						break
 					}
@@ -579,10 +826,211 @@ func (m *Merger) inlinePackage(pkg *PackageSymbols, used map[string]bool) {
 	for path, spec := range pkg.imports {
 		importPath := strings.Trim(path, `"`)
 		if m.moduleName != "" && strings.HasPrefix(importPath, m.moduleName) {
-			continue // local package already inlined, don't re-import
+			continue
 		}
 		if _, exists := m.addedImports[path]; !exists {
 			m.addedImports[path] = spec
+		}
+	}
+}
+
+// resolveSubPkgImports inlines a package's own local imports that are NOT
+// already handled by the main resolveLocalImports (sibling packages).
+// e.g., gamma imports epsilon → epsilon.ExampleScale is inlined into gamma.
+func (m *Merger) resolveSubPkgImports(pkg *PackageSymbols) error {
+	if len(pkg.localImports) == 0 {
+		return nil
+	}
+
+	for subPath, subAlias := range pkg.localImports {
+		// Skip imports already handled as sibling packages by the main resolver.
+		if _, isSibling := m.localImports[subPath]; isSibling {
+			continue
+		}
+		relPath := strings.TrimPrefix(subPath, m.moduleName+"/")
+		dir := filepath.Join(m.repoRoot, relPath)
+
+		subPkg, err := parsePackageSymbols(dir, subAlias, m.moduleName)
+		if err != nil {
+			return fmt.Errorf("parsing sub-package %s: %w", subPath, err)
+		}
+
+		// Recursively resolve sub-sub-packages.
+		if err := m.resolveSubPkgImports(subPkg); err != nil {
+			return err
+		}
+
+		// Rewrite subAlias.Symbol → Symbol (inline directly, no prefix).
+		for _, fn := range pkg.funcs {
+			if fn.Body != nil {
+				rewriteStmtListPrefix(fn.Body.List, subAlias, "")
+			}
+			rewriteFieldListPrefix(fn.Recv, subAlias, "")
+			rewriteFieldListPrefix(fn.Type.Params, subAlias, "")
+			rewriteFieldListPrefix(fn.Type.Results, subAlias, "")
+		}
+		for _, spec := range pkg.vars {
+			if v, ok := spec.(*ast.ValueSpec); ok {
+				v.Type = rewriteExprPrefix(v.Type, subAlias, "")
+				for i := range v.Values {
+					v.Values[i] = rewriteExprPrefix(v.Values[i], subAlias, "")
+				}
+			}
+		}
+		for _, spec := range pkg.types {
+			if t, ok := spec.(*ast.TypeSpec); ok {
+				t.Type = rewriteExprPrefix(t.Type, subAlias, "")
+			}
+		}
+
+		// Merge sub-package symbols into parent package.
+		for key, fn := range subPkg.funcs {
+			if _, exists := pkg.funcs[key]; !exists {
+				pkg.funcs[key] = fn
+				if recv := recvTypeName(fn); recv != "" {
+					pkg.typeMethods[recv] = append(pkg.typeMethods[recv], key)
+				}
+			}
+		}
+		for name, spec := range subPkg.types {
+			if _, exists := pkg.types[name]; !exists {
+				pkg.types[name] = spec
+			}
+		}
+		for name, spec := range subPkg.vars {
+			if _, exists := pkg.vars[name]; !exists {
+				pkg.vars[name] = spec
+			}
+		}
+		for _, block := range subPkg.consts {
+			for _, spec := range block.Specs {
+				if v, ok := spec.(*ast.ValueSpec); ok {
+					for _, n := range v.Names {
+						pkg.constNames[n.Name] = true
+					}
+				}
+			}
+			pkg.consts = append(pkg.consts, block)
+		}
+		for path, spec := range subPkg.imports {
+			if _, exists := pkg.imports[path]; !exists {
+				pkg.imports[path] = spec
+			}
+		}
+	}
+
+	return nil
+}
+
+// resolveCrossPkgDeps inlines symbols from already-processed packages that
+// are transitively referenced by newly-inlined code (e.g., gamma uses
+// alpha.ExampleVar which became aExampleVar after rewriting).
+func (m *Merger) resolveCrossPkgDeps(parsedPkgs map[string]*PackageSymbols) {
+	// Build index: prefixed symbol name → package symbol (vars, types, funcs, consts).
+	type pkgSymRef struct {
+		pkg  *PackageSymbols
+		kind string // "var", "type", "func", "const"
+	}
+	symIndex := make(map[string]pkgSymRef)
+	for _, pkg := range parsedPkgs {
+		for name := range pkg.vars {
+			symIndex[name] = pkgSymRef{pkg, "var"}
+		}
+		for name := range pkg.types {
+			symIndex[name] = pkgSymRef{pkg, "type"}
+		}
+		for name := range pkg.funcs {
+			symIndex[name] = pkgSymRef{pkg, "func"}
+		}
+		for name := range pkg.constNames {
+			symIndex[name] = pkgSymRef{pkg, "const"}
+		}
+	}
+
+	for {
+		// Collect all currently declared symbols.
+		declared := make(map[string]bool)
+		for name := range m.addedVars {
+			declared[name] = true
+		}
+		for name := range m.addedTypes {
+			declared[name] = true
+		}
+		for _, fn := range m.addedFunc {
+			declared[fn.Name.Name] = true
+		}
+		for name := range m.constNames {
+			declared[name] = true
+		}
+
+		// Walk merged code for undeclared identifiers matching package symbols.
+		missing := make(map[string]bool)
+		visitor := func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok {
+				if !declared[ident.Name] {
+					if _, ok := symIndex[ident.Name]; ok {
+						missing[ident.Name] = true
+					}
+				}
+			}
+			return true
+		}
+		for _, fn := range m.addedFunc {
+			ast.Inspect(fn, visitor)
+		}
+		for _, spec := range m.addedVars {
+			ast.Inspect(spec, visitor)
+		}
+		for _, spec := range m.addedTypes {
+			ast.Inspect(spec, visitor)
+		}
+		for _, block := range m.constDecls {
+			ast.Inspect(block, visitor)
+		}
+
+		if len(missing) == 0 {
+			break
+		}
+
+		// Inline the missing symbols.
+		for name := range missing {
+			ref := symIndex[name]
+			switch ref.kind {
+			case "var":
+				if spec, ok := ref.pkg.vars[name]; ok {
+					m.addedVars[name] = spec
+				}
+			case "type":
+				if spec, ok := ref.pkg.types[name]; ok {
+					m.addedTypes[name] = spec
+				}
+			case "func":
+				if fn, ok := ref.pkg.funcs[name]; ok {
+					m.addedFunc[name] = fn
+				}
+			case "const":
+				// Find and inline the entire const block containing this name.
+				for _, block := range ref.pkg.consts {
+					for _, spec := range block.Specs {
+						if v, ok := spec.(*ast.ValueSpec); ok {
+							for _, n := range v.Names {
+								if n.Name == name {
+									for _, s := range block.Specs {
+										if vs, ok := s.(*ast.ValueSpec); ok {
+											for _, cn := range vs.Names {
+												m.constNames[cn.Name] = true
+											}
+										}
+									}
+									m.constDecls = append(m.constDecls, block)
+									goto nextMissing
+								}
+							}
+						}
+					}
+				}
+			nextMissing:
+			}
 		}
 	}
 }

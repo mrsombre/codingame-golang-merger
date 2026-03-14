@@ -255,6 +255,9 @@ func (m *Merger) sortAddedFuncs() []*ast.FuncDecl {
 }
 
 func (m *Merger) WriteToFile(sourceName string) error {
+	// Dead code elimination: remove symbols not reachable from main/init.
+	m.eliminateDeadCode()
+
 	source, err := os.Create(sourceName)
 	if err != nil {
 		return err
@@ -269,6 +272,7 @@ func (m *Merger) WriteToFile(sourceName string) error {
 		m.tree.Decls = append(m.tree.Decls, decl)
 	}
 
+	// Comments are already stripped (parser mode 0 does not preserve them).
 	if err := printer.Fprint(source, token.NewFileSet(), m.tree); err != nil {
 		return err
 	}
