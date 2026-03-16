@@ -489,16 +489,253 @@ func rewriteSelectorsPrefix(m *Merger, alias, prefix string) {
 	}
 }
 
-// renameIdents walks an AST node and renames identifiers according to the map.
-func renameIdents(node ast.Node, renames map[string]string) {
-	ast.Inspect(node, func(n ast.Node) bool {
-		if ident, ok := n.(*ast.Ident); ok {
-			if newName, found := renames[ident.Name]; found {
-				ident.Name = newName
-			}
+// renameIdent renames a single identifier if it appears in the map.
+func renameIdent(ident *ast.Ident, renames map[string]string) {
+	if ident == nil {
+		return
+	}
+	if newName, found := renames[ident.Name]; found {
+		ident.Name = newName
+	}
+}
+
+// renameExpr renames identifiers in an expression (type references, values, etc.).
+func renameExpr(expr ast.Expr, renames map[string]string) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *ast.Ident:
+		renameIdent(e, renames)
+	case *ast.StarExpr:
+		renameExpr(e.X, renames)
+	case *ast.ArrayType:
+		renameExpr(e.Elt, renames)
+		renameExpr(e.Len, renames)
+	case *ast.MapType:
+		renameExpr(e.Key, renames)
+		renameExpr(e.Value, renames)
+	case *ast.ChanType:
+		renameExpr(e.Value, renames)
+	case *ast.FuncType:
+		renameFieldListTypes(e.Params, renames)
+		renameFieldListTypes(e.Results, renames)
+	case *ast.SelectorExpr:
+		renameExpr(e.X, renames)
+		// Do NOT rename e.Sel — it's a field/method selector
+	case *ast.IndexExpr:
+		renameExpr(e.X, renames)
+		renameExpr(e.Index, renames)
+	case *ast.IndexListExpr:
+		renameExpr(e.X, renames)
+		for _, idx := range e.Indices {
+			renameExpr(idx, renames)
 		}
-		return true
-	})
+	case *ast.CallExpr:
+		renameExpr(e.Fun, renames)
+		for _, arg := range e.Args {
+			renameExpr(arg, renames)
+		}
+	case *ast.UnaryExpr:
+		renameExpr(e.X, renames)
+	case *ast.BinaryExpr:
+		renameExpr(e.X, renames)
+		renameExpr(e.Y, renames)
+	case *ast.ParenExpr:
+		renameExpr(e.X, renames)
+	case *ast.TypeAssertExpr:
+		renameExpr(e.X, renames)
+		renameExpr(e.Type, renames)
+	case *ast.CompositeLit:
+		renameExpr(e.Type, renames)
+		for _, elt := range e.Elts {
+			renameExpr(elt, renames)
+		}
+	case *ast.KeyValueExpr:
+		// Key can be a struct field name, map key, or array index constant.
+		// We rename keys because array/map index constants must be renamed (e.g.,
+		// DirUp in [4][2]int{DirUp: ...}). Struct field names are generally not
+		// package-level symbols, so they won't match the renames map. Edge case:
+		// if a field name coincidentally matches a package symbol, it would be
+		// incorrectly renamed — fixing this requires type info we don't have.
+		renameExpr(e.Key, renames)
+		renameExpr(e.Value, renames)
+	case *ast.SliceExpr:
+		renameExpr(e.X, renames)
+		renameExpr(e.Low, renames)
+		renameExpr(e.High, renames)
+		renameExpr(e.Max, renames)
+	case *ast.FuncLit:
+		renameExpr(e.Type, renames)
+		renameStmtList(e.Body.List, renames)
+	case *ast.Ellipsis:
+		renameExpr(e.Elt, renames)
+	case *ast.InterfaceType:
+		renameFieldListTypes(e.Methods, renames)
+	case *ast.StructType:
+		renameFieldListTypes(e.Fields, renames)
+	}
+}
+
+// renameFieldListTypes renames type references in a field list, leaving field names untouched.
+func renameFieldListTypes(fl *ast.FieldList, renames map[string]string) {
+	if fl == nil {
+		return
+	}
+	for _, field := range fl.List {
+		renameExpr(field.Type, renames)
+	}
+}
+
+// renameStmt renames identifiers in a statement.
+func renameStmt(stmt ast.Stmt, renames map[string]string) {
+	if stmt == nil {
+		return
+	}
+	switch s := stmt.(type) {
+	case *ast.ExprStmt:
+		renameExpr(s.X, renames)
+	case *ast.AssignStmt:
+		for _, expr := range s.Lhs {
+			renameExpr(expr, renames)
+		}
+		for _, expr := range s.Rhs {
+			renameExpr(expr, renames)
+		}
+	case *ast.ReturnStmt:
+		for _, expr := range s.Results {
+			renameExpr(expr, renames)
+		}
+	case *ast.IfStmt:
+		renameStmt(s.Init, renames)
+		renameExpr(s.Cond, renames)
+		renameStmt(s.Body, renames)
+		renameStmt(s.Else, renames)
+	case *ast.ForStmt:
+		renameStmt(s.Init, renames)
+		renameExpr(s.Cond, renames)
+		renameStmt(s.Post, renames)
+		renameStmt(s.Body, renames)
+	case *ast.RangeStmt:
+		renameExpr(s.Key, renames)
+		renameExpr(s.Value, renames)
+		renameExpr(s.X, renames)
+		renameStmt(s.Body, renames)
+	case *ast.BlockStmt:
+		renameStmtList(s.List, renames)
+	case *ast.SwitchStmt:
+		renameStmt(s.Init, renames)
+		renameExpr(s.Tag, renames)
+		renameStmtList(s.Body.List, renames)
+	case *ast.TypeSwitchStmt:
+		renameStmt(s.Init, renames)
+		renameStmt(s.Assign, renames)
+		renameStmtList(s.Body.List, renames)
+	case *ast.CaseClause:
+		for _, expr := range s.List {
+			renameExpr(expr, renames)
+		}
+		renameStmtList(s.Body, renames)
+	case *ast.SelectStmt:
+		renameStmtList(s.Body.List, renames)
+	case *ast.CommClause:
+		renameStmt(s.Comm, renames)
+		renameStmtList(s.Body, renames)
+	case *ast.SendStmt:
+		renameExpr(s.Chan, renames)
+		renameExpr(s.Value, renames)
+	case *ast.IncDecStmt:
+		renameExpr(s.X, renames)
+	case *ast.DeclStmt:
+		renameDecl(s.Decl, renames)
+	case *ast.GoStmt:
+		renameExpr(s.Call, renames)
+	case *ast.DeferStmt:
+		renameExpr(s.Call, renames)
+	case *ast.BranchStmt:
+		// label — don't rename
+	case *ast.LabeledStmt:
+		// don't rename the label
+		renameStmt(s.Stmt, renames)
+	}
+}
+
+// renameStmtList renames identifiers in a list of statements.
+func renameStmtList(stmts []ast.Stmt, renames map[string]string) {
+	for _, stmt := range stmts {
+		renameStmt(stmt, renames)
+	}
+}
+
+// renameDecl renames type references in a local declaration (DeclStmt inside functions).
+// Does NOT rename declared names — local types/vars are not package symbols.
+func renameDecl(decl ast.Decl, renames map[string]string) {
+	switch d := decl.(type) {
+	case *ast.GenDecl:
+		for _, spec := range d.Specs {
+			renameSpecTypes(spec, renames)
+		}
+	}
+}
+
+// renameSpec renames both the declared name and type references in a spec.
+// Used for top-level package symbols.
+func renameSpec(spec ast.Spec, renames map[string]string) {
+	switch s := spec.(type) {
+	case *ast.TypeSpec:
+		renameIdent(s.Name, renames)
+		renameExpr(s.Type, renames)
+	case *ast.ValueSpec:
+		for _, name := range s.Names {
+			renameIdent(name, renames)
+		}
+		renameExpr(s.Type, renames)
+		for _, val := range s.Values {
+			renameExpr(val, renames)
+		}
+	}
+}
+
+// renameSpecTypes renames only type references in a spec, leaving declared names intact.
+// Used for local declarations inside function bodies.
+func renameSpecTypes(spec ast.Spec, renames map[string]string) {
+	switch s := spec.(type) {
+	case *ast.TypeSpec:
+		renameExpr(s.Type, renames)
+	case *ast.ValueSpec:
+		renameExpr(s.Type, renames)
+		for _, val := range s.Values {
+			renameExpr(val, renames)
+		}
+	}
+}
+
+// renameIdents walks an AST node and renames identifiers according to the map,
+// carefully distinguishing between type references and field/label names.
+func renameIdents(node ast.Node, renames map[string]string) {
+	switch n := node.(type) {
+	case *ast.FuncDecl:
+		// Rename the function name
+		renameIdent(n.Name, renames)
+		// Rename receiver types (not names)
+		renameFieldListTypes(n.Recv, renames)
+		// Rename parameter and result types (not names)
+		renameFieldListTypes(n.Type.Params, renames)
+		renameFieldListTypes(n.Type.Results, renames)
+		// Rename body
+		if n.Body != nil {
+			renameStmtList(n.Body.List, renames)
+		}
+	case *ast.TypeSpec:
+		renameSpec(n, renames)
+	case ast.Spec:
+		renameSpec(n, renames)
+	case *ast.GenDecl:
+		// Top-level GenDecl: rename both names and types (package symbols).
+		for _, spec := range n.Specs {
+			renameSpec(spec, renames)
+		}
+	}
 }
 
 // renamePackageSymbols renames all symbols in a package with the given prefix
