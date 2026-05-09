@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p bin
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="-w -s" -o bin/cgmerge-arm64 ./cmd/cgmerge
+          GOOS=linux   GOARCH=amd64 go build -ldflags="-w -s" -o bin/cgmerge-amd64 ./cmd/cgmerge
+          GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o bin/cgmerge.exe ./cmd/cgmerge
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            bin/cgmerge-arm64 \
+            bin/cgmerge-amd64 \
+            bin/cgmerge.exe \
+            --clobber
