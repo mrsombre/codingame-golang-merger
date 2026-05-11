@@ -1,48 +1,56 @@
-# Go File Merger
+# Source Code Merger
 
-Go File Merger is a command line tool that allows you to merge multiple Go source files into a single file. This can be useful in coding competitions like [codingame](https://www.codingame.com) or other situations where you are limited to a single file for your code.
+Source Code Merger is a command line tool that merges multiple source files from a project directory into a single file. Useful for coding competitions like [codingame](https://www.codingame.com) or any situation where you must submit a single source file.
 
-## Installation
+Per-language adapters control how files are bundled. The Go adapter:
 
-### Linux / Mac / WSL
-
-```shell
-git clone https://github.com/mrsombre/codingame-golang-merger.git
-cd codingame-golang-merger
-go build -o bin/cgmerge ./cmd/cgmerge
-sudo mv bin/cgmerge /usr/local/bin/cgmerge
-```
-
-### Example
-
-```shell
-cd example/simple
-cgmerge
-```
+- picks up every `*.go` file in the source directory (`*_test.go` ignored),
+- promotes `main.go` to the top of the output,
+- emits a single `package` clause and a single deduped `import (...)` block,
+- strips all comments (line, inline, block, doc).
 
 ## Usage
 
-To use Go File Merger, navigate to the directory containing the Go source files that you want to merge. Then, use the following command:
-
 ```shell
-cgmerge [--output <output_filename>] [--dir <source_directory_name>]
+cgmerge [-s <source_dir>] [-o <output_file>] [-l <lang>]
 ```
+
+If `--lang` is omitted, the language is auto-detected from a marker file in the source directory (e.g. `main.go` for Go).
+
+If `--output` ends with the placeholder `.ext`, it is replaced by the adapter's real extension (so the default `bundle.ext` becomes `bundle.go`).
 
 ### Options
 
 ```shell
-  -d, --dir string      Source directory to parse (default ".")
-  -o, --output string   Output file name (default "bundle.go")
+  -s, --source string   Source directory to parse (default ".")
+  -o, --output string   Output file name (default "bundle.ext")
+  -l, --lang string     Source language (auto-detect if empty)
   -h, --help            Show usage summary
+  -v, --version         Show version
 ```
 
-## Notes
+### Examples
 
-- This tool could merge only files from one directory using `main` package namespace and did not merge files imported from other packages.
-- This tool does not check for syntax errors, so make sure that your code is syntactically correct before merging the files.
-- The tool does not check for conflicts between files, so you need to make sure that there are no conflicts manually.
-- The tool does not delete any of the original files, so you can keep them for reference.
+Auto-detect language, write `./bundle.go` next to the sources:
 
-## Contribution
+```shell
+cgmerge -s ./example/golang
+```
 
-If you find a bug or have an idea for a new feature, don't hesitate to open an issue or a pull request.
+Force the Go adapter, write to a custom path:
+
+```shell
+cgmerge -s ./cmd/bit -l go -o ./tmp/bit-bundle.go
+# merged ./cmd/bit -> ./tmp/bit-bundle.go (10234 bytes)
+```
+
+Use the `.ext` placeholder so the adapter picks the extension:
+
+```shell
+cgmerge -s ./example/golang -o ./tmp/bundle.ext
+# merged ./example/golang -> ./tmp/bundle.go (1421 bytes)
+```
+
+## License
+
+[MIT](LICENSE) © 2023 Dmitrii Barsukov

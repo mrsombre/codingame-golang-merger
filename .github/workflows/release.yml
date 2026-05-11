@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    name: Build and Publish
+    name: Build and publish
     runs-on: ubuntu-latest
 
     steps:
@@ -19,21 +19,23 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build binaries
+      - name: Build cgmerge binaries
         env:
           CGO_ENABLED: "0"
         run: |
           mkdir -p bin
-          GOOS=darwin  GOARCH=arm64 go build -ldflags="-w -s" -o bin/cgmerge-arm64 ./cmd/cgmerge
-          GOOS=linux   GOARCH=amd64 go build -ldflags="-w -s" -o bin/cgmerge-amd64 ./cmd/cgmerge
-          GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o bin/cgmerge.exe ./cmd/cgmerge
+          GOOS=darwin  GOARCH=arm64 go build -ldflags="-w -s" -o bin/cgmerge-darwin-arm64      ./cmd/cgmerge
+          GOOS=linux   GOARCH=amd64 go build -ldflags="-w -s" -o bin/cgmerge-linux-amd64       ./cmd/cgmerge
+          GOOS=linux   GOARCH=arm64 go build -ldflags="-w -s" -o bin/cgmerge-linux-arm64       ./cmd/cgmerge
+          GOOS=windows GOARCH=amd64 go build -ldflags="-w -s" -o bin/cgmerge-windows-amd64.exe ./cmd/cgmerge
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
-            bin/cgmerge-arm64 \
-            bin/cgmerge-amd64 \
-            bin/cgmerge.exe \
+            bin/cgmerge-darwin-arm64 \
+            bin/cgmerge-linux-amd64 \
+            bin/cgmerge-linux-arm64 \
+            bin/cgmerge-windows-amd64.exe \
             --clobber
