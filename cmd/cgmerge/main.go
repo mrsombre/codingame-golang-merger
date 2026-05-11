@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	flag "github.com/spf13/pflag"
 
@@ -16,21 +15,21 @@ var (
 )
 
 func main() {
-	var err error
-
-	var optSourceName string
-	var optDirName string
+	var optOutput string
+	var optSource string
+	var optLang string
 	var showHelp bool
 	var showVersion bool
 
-	flag.StringVarP(&optSourceName, "output", "o", "bundle.go", "Output file name")
-	flag.StringVarP(&optDirName, "dir", "d", ".", "Source directory to parse")
+	flag.StringVarP(&optOutput, "output", "o", "bundle.ext", "Output file name")
+	flag.StringVarP(&optSource, "source", "s", ".", "Source directory to parse")
+	flag.StringVarP(&optLang, "lang", "l", "", "Source language (auto-detect if empty)")
 	flag.BoolVarP(&showHelp, "help", "h", false, "Show usage summary")
 	flag.BoolVarP(&showVersion, "version", "v", false, "Show version")
 	flag.Parse()
 
 	if showHelp {
-		fmt.Println("Usage: merger [options]")
+		fmt.Println("Usage: cgmerge [options]")
 		fmt.Println("Options:")
 		flag.PrintDefaults()
 		os.Exit(0)
@@ -41,23 +40,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	if !flag.CommandLine.Changed("output") {
-		optSourceName = filepath.Join(optDirName, optSourceName)
+	out, err := internal.Run(optSource, optOutput, optLang)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
 	}
-
-	merger := internal.NewMerger()
-	if err = merger.ParseDir(optDirName, optSourceName); err != nil {
-		fmt.Println(err)
-		return
+	info, err := os.Stat(out)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %s\n", err)
+		os.Exit(1)
 	}
-
-	if err = merger.WriteToFile(optSourceName); err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	absDirMain, _ := filepath.Abs(filepath.Join(optDirName, "main.go"))
-	absOutput, _ := filepath.Abs(optSourceName)
-	info, _ := os.Stat(optSourceName)
-	fmt.Printf("merged %s ->\n  %s (%d chars)\n", absDirMain, absOutput, info.Size())
+	fmt.Printf("merged %s -> %s (%d bytes)\n", optSource, out, info.Size())
 }

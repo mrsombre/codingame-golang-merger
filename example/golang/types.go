@@ -1,5 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
+
 type ExampleType struct {
 	Name  string
 	Value int
@@ -31,7 +35,7 @@ func (m *ExampleTypeUsingOther) Check(s *ExampleTypeWithFunc) string {
 	if val > 100 {
 		return m.Name + ": HIGH"
 	}
-	return m.Name + ": OK"
+	return fmt.Sprintf("%s: OK", m.Name)
 }
 
 type ExampleIotaKind int

@@ -2,8 +2,7 @@
 .vscode
 .DS_Store
 
-**/skills
-
+**/*/skills
 .claude/settings.local.json
 
 bin/
