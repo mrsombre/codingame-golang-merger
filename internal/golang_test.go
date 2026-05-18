@@ -176,6 +176,43 @@ func TestGoAdapterMerge(t *testing.T) {
 		}
 	})
 
+	t.Run("formats merged source", func(t *testing.T) {
+		dir := t.TempDir()
+		src := "package main\nimport \"fmt\"\nfunc main(){\n    if true {\n        fmt.Println(\"x\")\n    }\n\n\n\n}\n"
+		writeFile(t, dir, "main.go", src)
+		got, err := a.Merge([]string{filepath.Join(dir, "main.go")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(got)
+		if strings.Contains(s, "\t") {
+			t.Errorf("expected tabs removed from merged source:\n%s", s)
+		}
+		if strings.Contains(s, "\n\n") {
+			t.Errorf("expected repeated blank lines collapsed in:\n%s", s)
+		}
+		if !strings.Contains(s, "\nif true {\nfmt.Println(\"x\")\n}\n") {
+			t.Errorf("expected readable newlines to remain in:\n%s", s)
+		}
+	})
+
+	t.Run("keeps raw string whitespace while compacting source", func(t *testing.T) {
+		dir := t.TempDir()
+		src := "package main\nfunc main(){\n\t_ = `a\tb\n\nc`\n\n\n}\n"
+		writeFile(t, dir, "main.go", src)
+		got, err := a.Merge([]string{filepath.Join(dir, "main.go")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(got)
+		if !strings.Contains(s, "`a\tb\n\nc`") {
+			t.Errorf("expected raw string whitespace preserved in:\n%s", s)
+		}
+		if strings.Contains(strings.ReplaceAll(s, "`a\tb\n\nc`", "`raw`"), "\n\n") {
+			t.Errorf("expected source blank lines collapsed outside raw strings:\n%s", s)
+		}
+	})
+
 	t.Run("file not found", func(t *testing.T) {
 		_, err := a.Merge([]string{"/no/such/file.go"})
 		if err == nil {
