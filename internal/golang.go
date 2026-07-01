@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
@@ -84,10 +85,95 @@ func (a *GoAdapter) Merge(files []string) ([]byte, error) {
 		buf.Write(body)
 		buf.WriteString("\n\n")
 	}
-	return buf.Bytes(), nil
+	formatted, err := format.Source(buf.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("format merged go source: %w", err)
+	}
+	return compactGoWhitespace(formatted), nil
 }
 
 type byteSpan struct{ start, end int }
+
+func compactGoWhitespace(data []byte) []byte {
+	const (
+		stateCode = iota
+		stateRawString
+		stateString
+		stateRune
+	)
+
+	var out bytes.Buffer
+	state := stateCode
+	escaped := false
+
+	for _, b := range data {
+		switch state {
+		case stateCode:
+			switch b {
+			case '\t':
+				continue
+			case '\n':
+				for out.Len() > 0 {
+					last := out.Bytes()[out.Len()-1]
+					if last != ' ' && last != '\t' {
+						break
+					}
+					out.Truncate(out.Len() - 1)
+				}
+				if out.Len() == 0 || out.Bytes()[out.Len()-1] == '\n' {
+					continue
+				}
+				out.WriteByte(b)
+			case '`':
+				state = stateRawString
+				out.WriteByte(b)
+			case '"':
+				state = stateString
+				escaped = false
+				out.WriteByte(b)
+			case '\'':
+				state = stateRune
+				escaped = false
+				out.WriteByte(b)
+			default:
+				out.WriteByte(b)
+			}
+		case stateRawString:
+			out.WriteByte(b)
+			if b == '`' {
+				state = stateCode
+			}
+		case stateString:
+			out.WriteByte(b)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if b == '\\' {
+				escaped = true
+				continue
+			}
+			if b == '"' {
+				state = stateCode
+			}
+		case stateRune:
+			out.WriteByte(b)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if b == '\\' {
+				escaped = true
+				continue
+			}
+			if b == '\'' {
+				state = stateCode
+			}
+		}
+	}
+
+	return out.Bytes()
+}
 
 func stripBoilerplate(data []byte, fset *token.FileSet, f *ast.File) []byte {
 	spans := []byteSpan{lineSpan(data, fset.Position(f.Package).Offset)}

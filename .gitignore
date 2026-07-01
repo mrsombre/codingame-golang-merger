@@ -9,3 +9,6 @@ bin/
 tmp/
 
 bundle.go
+
+__pycache__/
+*.pyc
